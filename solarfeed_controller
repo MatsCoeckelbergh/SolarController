@@ -1,0 +1,220 @@
+import PyIndi
+import time
+import sys
+from enum import Enum
+
+
+#============================================================================#
+#    https://www.notion.so/ivsinstrumentation/SolarController-Documentation-f61dba7ba6d74ab79751839a17781b31   #
+#============================================================================#
+
+
+# Enumerations for telescope slew rates and directions
+class SLEW_RATES(Enum):
+    MIN = 0
+    VERY_VERY_SLOW = 1
+    VERY_SLOW = 2
+    SLOW = 3
+    SOMEWHAT_SLOW = 4
+    MEDIUM = 5
+    SOMEWHAT_FAST = 6
+    FAST = 7
+    VERY_FAST = 8
+    MAX = 9
+
+class DIRECTIONS(Enum):
+    NORTH = "n"
+    EAST = "e"
+    SOUTH = "s"
+    WEST = "w"
+
+# Custom INDI client class
+class SolarIndiClient(PyIndi.BaseClient):
+
+    def __init__(self):
+        self.attached_device = None
+        self.cmonitor = None
+        super(SolarIndiClient, self).__init__()
+
+    def newDevice(self, device):
+        # Called when a new INDI device is detected
+        self.attached_device = device
+        print("New device ", device.getDeviceName())
+
+    def newProperty(self, property):
+        # Called when a new INDI property is detected
+        if (property.getDeviceName() == "EQMod Mount" and property.getName() == "CONNECTION"):
+            self.cmonitor = property.getSwitch()
+        print("New property ", property.getName(), " for device ", property.getDeviceName())
+
+# Main telescope control class
+class SolarController():
+    
+    def __init__(self, telescope_driver: str = "EQMod Mount", wait_until_stable: bool = True):
+        # Initialize the INDI client
+        self.indiclient = SolarIndiClient()
+        self.indiclient.setServer("localhost", 7624)
+
+        # Connect to the INDI server
+        if not self.indiclient.connectServer():
+            print("No indiserver running on " + self.indiclient.getHost() + ":" + str(self.indiclient.getPort()))
+            sys.exit(1)
+
+        # Wait for device and property monitors to be initialized
+        while not self.indiclient.cmonitor:
+            time.sleep(0.05)
+        while not self.indiclient.attached_device:
+            time.sleep(0.05)
+
+        # Ensure the telescope is connected
+        while not self.indiclient.attached_device.isConnected():
+            self.indiclient.cmonitor[0].setState(PyIndi.ISS_ON)
+            self.indiclient.attached_device[1].setState(PyIndi.ISS_OFF)
+            self.indiclient.sendNewSwitch(self.indiclient.cmonitor)
+
+        # Connect to the specified telescope
+        self.connect_telescope(telescope_driver)
+
+        # Wait for stability (optional)
+        if wait_until_stable:
+            time.sleep(3)
+
+    def connect_telescope(self, telescopeName: str):
+        # Connect to the specified telescope device
+        self.device = self.indiclient.getDevice(telescopeName)
+        telescope_connect = None
+
+        # Wait for the device to be available
+        while not self.device:
+            time.sleep(0.5)
+            self.device = self.indiclient.getDevice(telescopeName)
+
+        # Wait for the CONNECTION property to be available
+        telescope_connect = self.device.getSwitch("CONNECTION")
+        while not telescope_connect:
+            time.sleep(0.5)
+            telescope_connect = self.device.getSwitch("CONNECTION")
+
+    def is_moving(self):
+        # Check if the telescope is currently in motion
+        return self.device.getNumber("EQUATORIAL_EOD_COORD").getState() == PyIndi.IPS_BUSY
+
+    def move_telescope(self, ra: float, dec: float):
+        try:
+            # Move the telescope to the specified equatorial coordinates
+            telescope_radec = self.device.getNumber("EQUATORIAL_EOD_COORD")
+            telescope_radec[0].value = ra
+            telescope_radec[1].value = dec
+
+            # Wait for the motion to complete
+            while telescope_radec.getState() == PyIndi.IPS_BUSY:
+                time.sleep(0.1)
+
+            # Send the new coordinates to the telescope
+            self.indiclient.sendNewNumber(telescope_radec)
+        except:
+            # Handle potential segfaults by re-initializing the INDI client
+            print("Segfault occurred: Re-initialized IndiClient. Movement command will resume promptly.")
+            self.__init__()
+            self.move_telescope(self, ra, dec)
+
+    def move_telescope_and_wait(self, ra: float, dec: float):
+        # Move the telescope and wait for the motion to complete
+        self.move_telescope(ra, dec)
+        while self.is_moving():
+            time.sleep(0.05)
+        return
+
+    def get_PROPERTY(self, property: str) -> tuple:
+        # Get the current value of a specified INDI property
+        ret = self.indiclient.attached_device.getNumber(property)
+        if ret is None:
+            return None
+        return tuple(map(lambda i: i.value, ret))
+
+    def get_EQUATORIAL_EOD_COORD(self) -> tuple:
+        # Get the current equatorial coordinates of the telescope
+        return self.get_PROPERTY("EQUATORIAL_EOD_COORD")
+
+    def get_HORIZONTAL_COORD(self) -> tuple:
+        # Get the current horizontal coordinates of the telescope
+        return self.get_PROPERTY("HORIZONTAL_COORD")
+
+    def get_TARGET_EOD_COORD(self) -> tuple:
+        # Get the target equatorial coordinates of the telescope
+        return self.get_PROPERTY("TARGET_EOD_COORD")
+
+    def set_TELESCOPE_SLEW_RATE(self, slew_rate: int):
+        # Set the telescope slew rate
+        if slew_rate not in SLEW_RATES:
+            slew_rate = SLEW_RATES.MIN
+
+        target = self.device.getSwitch("TELESCOPE_SLEW_RATE")
+
+        # Turn off all slew rates
+        for s in target:
+            s.setState(PyIndi.ISS_OFF)
+
+        # Turn on the specified slew rate
+        target[slew_rate.value].setState(PyIndi.ISS_ON)
+
+        # Send the new switch state to the telescope
+        self.indiclient.sendNewSwitch(target)
+
+    def set_ON_COORD_SET(self, slew, track, sync):
+        # Set the ON_COORD_SET property for telescope motion
+        target = self.device.getSwitch("ON_COORD_SET")
+
+        target[0].setState(track)
+        target[1].setState(slew)
+        target[2].setState(sync)
+
+        # Send the new switch state to the telescope
+        self.indiclient.sendNewSwitch(target)
+
+    def set_TELESCOPE_MOTION_NS(self, direction: str):
+        # Set the telescope motion in the North-South direction
+        target = self.device.getSwitch("TELESCOPE_MOTION_NS")
+        target[0].setState(PyIndi.ISS_ON if direction is DIRECTIONS.NORTH else PyIndi.ISS_OFF)
+        target[1].setState(PyIndi.ISS_ON if direction is DIRECTIONS.SOUTH else PyIndi.ISS_OFF)
+        self.indiclient.sendNewSwitch(target)
+
+    def set_TELESCOPE_MOTION_WE(self, direction: str):
+        # Set the telescope motion in the West-East direction
+        target = self.device.getSwitch("TELESCOPE_MOTION_WE")
+        target[0].setState(PyIndi.ISS_ON if direction is DIRECTIONS.WEST else PyIndi.ISS_OFF)
+        target[1].setState(PyIndi.ISS_ON if direction is DIRECTIONS.EAST else PyIndi.ISS_OFF)
+        self.indiclient.sendNewSwitch(target)
+
+    def move_manually(self, NS: str = None, WE: str = None):
+        # Initiate manual telescope motion in specified directions
+        self.abort_motion()
+        self.set_ON_COORD_SET(PyIndi.ISS_ON, PyIndi.ISS_OFF, PyIndi.ISS_OFF)
+        self.set_TELESCOPE_MOTION_NS(direction=NS)
+        self.set_TELESCOPE_MOTION_WE(direction=WE)
+
+    def set_TELESCOPE_ABORT_MOTION(self):
+        # Abort the current telescope motion
+        self.set_TELESCOPE_MOTION_NS(None)
+        target = self.device.getSwitch("TELESCOPE_ABORT_MOTION")
+        target[0].setState(PyIndi.ISS_OFF)
+        self.indiclient.sendNewSwitch(target)
+
+    def abort_motion(self):
+        # Abort any ongoing telescope motion
+        self.set_TELESCOPE_ABORT_MOTION()
+
+if __name__ == '__main__':
+    # Example usage
+    solar_ctrl = SolarController()
+    solar_ctrl.set_TELESCOPE_SLEW_RATE(SLEW_RATES.FAST)
+    vega = {'ra': (279.23473479 * 24.0) / 360.0, 'dec': +38.78368896}
+    #solar_ctrl.move_telescope_and_wait(vega["ra"], vega["dec"])
+    solar_ctrl.move_manually(WE=DIRECTIONS.WEST)
+    solar_ctrl.abort_motion()
+    while True:
+        time.sleep(1)
+        print(solar_ctrl.get_EQUATORIAL_EOD_COORD())
+    
+
+    print("done")
