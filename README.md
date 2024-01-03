@@ -1,5 +1,3 @@
-# SolarController Documentation
-
 The **SolarController** class is a Python script designed for controlling a telescope through the INDI (Instrument Neutral Distributed Interface) protocol, specifically using the PyIndi library. The script is intended for solar observation and telescope control.
 
 ## Class: `SLEW_RATES`
