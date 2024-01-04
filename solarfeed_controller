@@ -8,6 +8,51 @@ from enum import Enum
 #    https://www.notion.so/ivsinstrumentation/SolarController-Documentation-f61dba7ba6d74ab79751839a17781b31   #
 #============================================================================#
 
+# Hacky solution... I don't really understand why this code has to be run for the SolarController class to behave correctly
+# It only needs to be run once after the indiserver has started
+class IndiClient(PyIndi.BaseClient):
+    def __init__(self):
+        super(IndiClient, self).__init__()
+
+    def newDevice(self, d):
+        global dmonitor
+        dmonitor=d
+        print("New device ", d.getDeviceName())
+
+    def newProperty(self, p):
+        global cmonitor
+        if (p.getDeviceName()=="EQMod Mount" and p.getName() == "CONNECTION"):
+            cmonitor=p.getSwitch()
+        print("New property ", p.getName(), " for device ", p.getDeviceName())
+
+dmonitor=None
+cmonitor=None
+indiclient=IndiClient()
+indiclient.setServer("localhost",7624)
+if (not(indiclient.connectServer())):
+    print("No indiserver running on "+indiclient.getHost()+":"+str(indiclient.getPort()))
+    sys.exit(1)
+while not(cmonitor):
+    time.sleep(0.05)
+while not(dmonitor):
+    time.sleep(0.05)
+while not(dmonitor.isConnected()):
+    cmonitor[0].setState(PyIndi.ISS_ON)
+    cmonitor[1].setState(PyIndi.ISS_OFF) 
+    indiclient.sendNewSwitch(cmonitor)
+telescope="EQMod Mount"
+device_telescope=None
+telescope_connect=None
+device_telescope=indiclient.getDevice(telescope)
+while not(device_telescope):
+    time.sleep(0.5)
+    device_telescope=indiclient.getDevice(telescope)
+telescope_connect=device_telescope.getSwitch("CONNECTION")  
+while not(telescope_connect):
+    time.sleep(0.5)
+    telescope_connect=device_telescope.getSwitch("CONNECTION")
+
+time.sleep(3)
 
 # Enumerations for telescope slew rates and directions
 class SLEW_RATES(Enum):
